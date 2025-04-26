@@ -1,0 +1,53 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE files
+.idea/
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Uploaded images and processed results
+static/uploads/*
+static/images/*
+!static/uploads/.gitkeep
+!static/images/.gitkeep
+
+# Logs
+*.log
+
+# Local configuration
+.env 
+
+# Data
+data/
+
+# images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+
+static/uploads/*
+static/images/*
+
+.venv/*
+
+
+
