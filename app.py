@@ -33,7 +33,9 @@ try:
     custom_model_paths = [
         'license_plate_model.pt',
         'data/license_plate_data/weights/best.pt',
-        'license_plate_detection/train/weights/best.pt'
+        'license_plate_detection/train/weights/best.pt',
+        'yolov5n.pt',  # Small model for efficiency
+        'yolov5s.pt'   # More accurate but slower
     ]
     
     custom_model_path = None
@@ -44,15 +46,17 @@ try:
     
     if custom_model_path:
         print(f"Using custom license plate detector with model: {custom_model_path}")
-        detector = CustomLicensePlateDetector(weights_path=custom_model_path, device=device)
+        # Use a lower confidence threshold (0.25) to capture more potential plates
+        detector = CustomLicensePlateDetector(weights_path=custom_model_path, confidence_threshold=0.25, device=device)
         using_custom_detector = True
     else:
         print("Custom model not found, using original detector")
-        detector = LicensePlateDetector(device=device)
+        # Lower confidence threshold for original detector too
+        detector = LicensePlateDetector(confidence_threshold=0.25, device=device)
         using_custom_detector = False
 except ImportError:
     print("Custom detector not available, using original detector")
-    detector = LicensePlateDetector(device=device)
+    detector = LicensePlateDetector(confidence_threshold=0.25, device=device)
     using_custom_detector = False
 
 def allowed_file(filename):
@@ -85,12 +89,55 @@ def index():
                 flash('Error reading the image')
                 return redirect(request.url)
             
-            # Detect license plate
-            detections = detector.detect(image)
+            # Try multiple scales for better detection
+            results = []
+            scales = [1.0]  # Start with original size
+            
+            # For smaller images, also try upscaling
+            if min(image.shape[0], image.shape[1]) < 800:
+                scales.append(1.5)  # Add 1.5x upscaling
+                
+            # For larger images, also try downscaling
+            if max(image.shape[0], image.shape[1]) > 1600:
+                scales.append(0.5)  # Add 0.5x downscaling
+            
+            all_detections = []
+            
+            # Try detection at different scales
+            for scale in scales:
+                if scale != 1.0:
+                    scaled_image = cv2.resize(image, (0, 0), fx=scale, fy=scale)
+                else:
+                    scaled_image = image
+                
+                # Detect license plates
+                detections = detector.detect(scaled_image)
+                
+                # Adjust coordinates back to original scale if needed
+                if scale != 1.0:
+                    for i in range(len(detections)):
+                        detections[i][0] = int(detections[i][0] / scale)  # x1
+                        detections[i][1] = int(detections[i][1] / scale)  # y1
+                        detections[i][2] = int(detections[i][2] / scale)  # x2
+                        detections[i][3] = int(detections[i][3] / scale)  # y2
+                
+                all_detections.extend(detections)
+            
+            # Non-maximum suppression to remove duplicate detections
+            if len(all_detections) > 1:
+                # Convert to numpy array
+                boxes = np.array([[d[0], d[1], d[2], d[3]] for d in all_detections])
+                confidences = np.array([d[4] for d in all_detections])
+                
+                # Perform non-maximum suppression
+                indices = cv2.dnn.NMSBoxes(boxes.tolist(), confidences.tolist(), 0.25, 0.45)
+                
+                # Filter detections based on NMS results
+                filtered_detections = [all_detections[i] for i in indices.flatten()]
+                all_detections = filtered_detections
             
             # Process detections
-            results = []
-            for i, (x1, y1, x2, y2, conf, _) in enumerate(detections):
+            for i, (x1, y1, x2, y2, conf, _) in enumerate(all_detections):
                 # Ensure coordinates are within image bounds
                 x1 = max(0, int(x1))
                 y1 = max(0, int(y1))
@@ -107,10 +154,27 @@ def index():
                 # Preprocess plate for OCR - returns multiple preprocessed versions
                 processed_plates = preprocess_plate(plate_img)
                 
+                if not processed_plates:
+                    continue
+                
                 # Save the first preprocessed plate for display
                 processed_filename = f"plate_{i}_{filename}"
                 processed_filepath = os.path.join('static/images', processed_filename)
-                cv2.imwrite(processed_filepath, processed_plates[0])
+                if processed_plates and len(processed_plates) > 0:
+                    first_processed = processed_plates[0]
+                    if first_processed is not None and first_processed.size > 0:
+                        # Ensure image is in BGR format for saving
+                        if len(first_processed.shape) == 3 and first_processed.shape[2] == 3:
+                            if first_processed.dtype != np.uint8:
+                                first_processed = (first_processed * 255).astype(np.uint8)
+                            # Convert RGB to BGR if needed
+                            if first_processed[0, 0, 0] > first_processed[0, 0, 2]:
+                                first_processed = cv2.cvtColor(first_processed, cv2.COLOR_RGB2BGR)
+                        # If grayscale, convert to BGR for consistent saving
+                        elif len(first_processed.shape) == 2:
+                            first_processed = cv2.cvtColor(first_processed, cv2.COLOR_GRAY2BGR)
+                        
+                        cv2.imwrite(processed_filepath, first_processed)
                 
                 # Recognize text from the multiple preprocessed versions
                 plate_text = recognize_text(processed_plates)
@@ -127,8 +191,22 @@ def index():
             for result in results:
                 x1, y1, x2, y2 = result['coordinates']
                 text = result['text']
-                cv2.rectangle(output_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(output_img, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                conf = result['confidence']
+                
+                # Color based on confidence (green for high confidence, yellow for medium, red for low)
+                if conf >= 0.7:
+                    color = (0, 255, 0)  # Green
+                elif conf >= 0.5:
+                    color = (0, 255, 255)  # Yellow
+                else:
+                    color = (0, 0, 255)  # Red
+                
+                # Draw rectangle with the color
+                cv2.rectangle(output_img, (x1, y1), (x2, y2), color, 2)
+                
+                # Draw text with confidence
+                text_with_conf = f"{text} ({conf:.2f})"
+                cv2.putText(output_img, text_with_conf, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
             
             # Save the output image
             output_filename = f"output_{filename}"
