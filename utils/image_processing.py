@@ -60,6 +60,19 @@ def preprocess_plate(plate_img):
     gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
     gray_large = cv2.cvtColor(resized_plate, cv2.COLOR_BGR2GRAY)
     
+    # Add a new preprocessing step: bilateral filtering to reduce noise while preserving edges
+    bilateral = cv2.bilateralFilter(gray, 11, 17, 17)
+    bilateral_large = cv2.bilateralFilter(gray_large, 11, 17, 17)
+    preprocessed_images.append(bilateral)
+    preprocessed_images.append(bilateral_large)
+    
+    # New preprocessing: Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe_img = clahe.apply(gray)
+    clahe_large = clahe.apply(gray_large)
+    preprocessed_images.append(clahe_img)
+    preprocessed_images.append(clahe_large)
+    
     # Special processing for US-style plates (like AM 74043)
     if is_us_style_plate:
         # Apply specialized preprocessing for US-style plates
@@ -110,6 +123,11 @@ def preprocess_plate(plate_img):
         # 6. Original color image upscaled for color-aware OCR
         color_large = cv2.cvtColor(resized_plate, cv2.COLOR_BGR2RGB)
         preprocessed_images.append(color_large)
+        
+        # New: Try multiple thresholding values for very small plates
+        for thresh_val in [90, 120, 150, 180]:
+            _, bin_img = cv2.threshold(denoised, thresh_val, 255, cv2.THRESH_BINARY)
+            preprocessed_images.append(bin_img)
     
     # Add original color images (sometimes works better for colored plates)
     plate_img_rgb = cv2.cvtColor(plate_img, cv2.COLOR_BGR2RGB)
@@ -121,6 +139,14 @@ def preprocess_plate(plate_img):
     # Add original and resized grayscale
     preprocessed_images.append(gray)
     preprocessed_images.append(gray_large)
+    
+    # New: Try different thresholding values
+    for thresh_val in [100, 120, 140, 160, 180]:
+        _, fixed_thresh = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
+        preprocessed_images.append(fixed_thresh)
+        
+        _, fixed_thresh_large = cv2.threshold(gray_large, thresh_val, 255, cv2.THRESH_BINARY)
+        preprocessed_images.append(fixed_thresh_large)
     
     # Basic thresholding pipeline
     # Simple binary thresholding
@@ -144,6 +170,21 @@ def preprocess_plate(plate_img):
     thresh_otsu_inv_large = cv2.bitwise_not(thresh_otsu_large)
     preprocessed_images.append(thresh_otsu_inv_large)
     
+    # New: Try adaptive thresholding with different block sizes
+    blockSizes = [7, 11, 15, 19]
+    for blockSize in blockSizes:
+        adaptive_mean = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
+                                           cv2.THRESH_BINARY, blockSize, 2)
+        adaptive_gaussian = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                               cv2.THRESH_BINARY, blockSize, 2)
+        
+        preprocessed_images.append(adaptive_mean)
+        preprocessed_images.append(adaptive_gaussian)
+        
+        # Add inverted versions too
+        preprocessed_images.append(cv2.bitwise_not(adaptive_mean))
+        preprocessed_images.append(cv2.bitwise_not(adaptive_gaussian))
+    
     # SPECIALIZED PROCESSING FOR DIRECT LICENSE PLATES
     if is_direct_plate:
         # Increase contrast for direct plates
@@ -164,6 +205,11 @@ def preprocess_plate(plate_img):
         sharpened = cv2.filter2D(gray, -1, sharpening_kernel)
         _, thresh_sharp = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         preprocessed_images.append(thresh_sharp)
+        
+        # New: Try edge-based approaches for high-contrast plates
+        edges = cv2.Canny(gray, 100, 200)
+        dilated_edges = cv2.dilate(edges, np.ones((2,2), np.uint8), iterations=1)
+        preprocessed_images.append(dilated_edges)
     
     return preprocessed_images
 
@@ -368,29 +414,26 @@ def recognize_text(plate_img):
     
     # License plate configurations to try
     configs = [
-        # Optimized for US-style plates (like AM 74043)
+        # Optimized for license plates - single line with whitelist
         r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c tessedit_pageseg_mode=7',
         
-        # For small license plates in traffic scenes
-        r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c tessedit_pageseg_mode=7',
+        # Optimized for US-style plates (like AM 74043) - single line with character spacing
+        r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c tessedit_pageseg_mode=7 -c textord_space_size_is_variable=1',
         
-        # For cropped characters
-        r'--oem 3 --psm 10 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-        
-        # Single character mode
-        r'--oem 3 --psm 10 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-        
-        # Optimized for large text on license plates (like Texas plates)
-        r'--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c tessedit_pageseg_mode=6',
-        
-        # Standard license plate config
-        r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',
-        
-        # Treat as a single word (good for plates without spaces)
+        # For small license plates in traffic scenes - single word
         r'--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
         
-        # For small, unclear text - more aggressive settings
-        r'--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c page_separator=""',
+        # For cropped characters - single character mode
+        r'--oem 3 --psm 10 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+        
+        # Sparse text with OSD - might work better for some plates
+        r'--oem 3 --psm 11 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+        
+        # Word list to try to recognize common plate formats
+        r'--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c textord_min_linesize=2.5',
+        
+        # Assume a single uniform block of vertically aligned text
+        r'--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
     ]
     
     try:
@@ -433,9 +476,14 @@ def recognize_text(plate_img):
                                 if is_single_char and len(clean_text) == 1:
                                     char_results += clean_text
                                 else:
+                                    # Boost confidence for results with alphanumerics only
+                                    confidence_boost = 0
+                                    if all(c.isalnum() or c.isspace() for c in clean_text):
+                                        confidence_boost = 10
+                                    
                                     all_results.append({
                                         'text': clean_text, 
-                                        'confidence': 80.0,  # Assign reasonable confidence for direct string method
+                                        'confidence': 75.0 + confidence_boost,  # Assign reasonable confidence
                                         'method': 'direct',
                                         'raw': direct_text  # Save raw text for debugging
                                     })
@@ -455,7 +503,7 @@ def recognize_text(plate_img):
                         for i, conf in enumerate(data['conf']):
                             try:
                                 conf_val = float(conf)
-                                if conf != '-1' and conf_val > 20:  # Only consider recognized parts with confidence > 20%
+                                if conf != '-1' and conf_val > 30:  # Only consider recognized parts with confidence > 30%
                                     text_parts.append(data['text'][i])
                                     total_conf += conf_val
                                     count += 1
@@ -494,87 +542,11 @@ def recognize_text(plate_img):
                 # Filter out common state names when they appear alone
                 filtered_results = []
                 state_names = ["TEXAS", "CALIFORNIA", "FLORIDA", "NEW YORK", "OHIO", "WASHINGTON", 
-                              "OREGON", "MICHIGAN", "ALASKA", "HAWAII", "UTAH", "NEVADA"]
+                              "OREGON", "MICHIGAN", "ALASKA", "HAWAII", "UTAH", "NEVADA", "CHICAGO", 
+                              "ILLINOIS", "MASSACHUSETTS", "MARYLAND", "COLORADO", "DELAWARE", "IDAHO"]
                 
-                # Look for Toyota format AM 74043
-                # This format gets very high priority
-                toyota_results = []
-                
-                # Special handling for the white Toyota with AM 74043 plate
-                # 1. Look for exact patterns or close patterns
                 for result in all_results:
                     text = result['text'].strip().upper()
-                    raw_text = result.get('raw', text)
-                    
-                    # If we see "AM 74043" exactly, return immediately with highest confidence
-                    if "AM 74043" in text or "AM74043" in text.replace(" ", ""):
-                        return "AM 74043"
-                    
-                    # Common OCR confusions for this plate:
-                    # 8 → A, B → 8, S → 5, R → M, etc.
-                    
-                    # Define character substitutions for common confusions
-                    char_substitutions = {
-                        '8': 'A',  # 8 is often confused with A
-                        'B': 'A',  # B can be confused with A
-                        'R': 'M',  # R can be confused with M
-                        'I': '7',  # I can be confused with 7
-                        'S': '5',  # S can be confused with 5
-                        'O': '0',  # O can be confused with 0
-                        'Q': '0',  # Q can be confused with 0
-                        'D': '0',  # D can be confused with 0
-                        'U': '0',  # U can be confused with 0
-                        'Z': '7',  # Z can be confused with 7
-                        'L': '1',  # L can be confused with 1
-                        'T': '7',  # T can be confused with 7
-                    }
-                    
-                    # Apply substitutions to try to recover "AM 74043"
-                    corrected_text = text
-                    for char, replacement in char_substitutions.items():
-                        corrected_text = corrected_text.replace(char, replacement)
-                    
-                    # Check for patterns like "8AR", "BAR", etc. that might be "AM"
-                    # And "M54", "N54", etc. that might be "74"
-                    common_prefixes = ['8A', 'BA', '8R', 'BR', 'AM', 'AN', 'RM', 'BM']
-                    common_numbers = ['54', '74', '14', '4']
-                    
-                    for prefix in common_prefixes:
-                        if prefix in text:
-                            for num in common_numbers:
-                                if num in text:
-                                    # Likely a match for "AM 74043"
-                                    toyota_results.append({
-                                        'text': "AM 74043",
-                                        'confidence': 95.0,
-                                        'method': 'pattern_match'
-                                    })
-                                    break
-                    
-                    # The exact plate we know is in the image
-                    if "AM" in text and ("74" in text or "4" in text) and ("43" in text or "3" in text):
-                        return "AM 74043"
-                    
-                    # Check if the text contains "BAR" which is often confused with "AM"
-                    if "BAR" in text or "8AR" in text:
-                        # This is likely a misread of "AM"
-                        return "AM 74043"
-                    
-                    # Check for Toyota format: 2 letters + 5 digits
-                    toyota_match = re.search(r'([A-Z]{2})\s*(\d{5})', text)
-                    if toyota_match:
-                        # Check if letters might be "AM" with substitutions
-                        letters = toyota_match.group(1)
-                        if any(c in letters for c in "AB8") and any(c in letters for c in "MR"):
-                            # This is likely "AM"
-                            return "AM 74043"
-                        
-                        formatted_text = f"{toyota_match.group(1)} {toyota_match.group(2)}"
-                        toyota_results.append({
-                            'text': formatted_text,
-                            'confidence': result['confidence'] + 20.0,  # Huge confidence boost
-                            'method': result['method'] + '_toyota_format'
-                        })
                     
                     # Skip entries that are just state names
                     if text in state_names:
@@ -587,28 +559,22 @@ def recognize_text(plate_img):
                         has_numbers = any(c.isdigit() for c in text)
                         
                         if has_letters and has_numbers:
-                            result['confidence'] += 5.0  # Boost confidence for mixed alphanumeric
+                            result['confidence'] += 10.0  # Boost confidence for mixed alphanumeric
                         
                         # Boost results with common license plate lengths
                         if 5 <= len(text.replace(" ", "")) <= 8:
                             result['confidence'] += 5.0
                         
+                        # Penalize too short texts
+                        if len(text.replace(" ", "")) < 3:
+                            result['confidence'] -= 20.0
+                        
+                        # Boost confidence for texts with common license plate patterns
+                        # 3 letters + 3/4 numbers or 2 letters + 4/5 numbers
+                        if re.match(r'^[A-Z]{2,3}[ -]?\d{3,5}$', text):
+                            result['confidence'] += 15.0
+                            
                         filtered_results.append(result)
-                
-                # If we recognized "BAR M54U45 C5", it's a known misread of "AM 74043"
-                for result in filtered_results:
-                    text = result['text'].upper().replace(" ", "")
-                    if any(x in text for x in ["BAR", "8AR"]) and any(y in text for y in ["M5", "N5", "MS"]):
-                        return "AM 74043"
-                
-                # Special case for the detected "8AR M54U45 C5"
-                for result in filtered_results:
-                    if "8AR" in result['text'].upper() or "BAR" in result['text'].upper():
-                        if "M5" in result['text'].upper() or "MS" in result['text'].upper():
-                            return "AM 74043"
-                
-                # Combine results, with Toyota format results at top priority
-                filtered_results.extend(toyota_results)
                 
                 # If we filtered everything out, go with the original results
                 if not filtered_results and all_results:
@@ -617,57 +583,19 @@ def recognize_text(plate_img):
                 # Sort by confidence
                 filtered_results.sort(key=lambda x: x['confidence'], reverse=True)
                 
-                # If we have a Toyota format match, return it immediately
-                for result in filtered_results:
-                    if 'toyota_format' in result.get('method', ''):
-                        return result['text']
-                
-                # First, try direct pattern matching for AM 74043 format
-                for result in filtered_results:
-                    text = result['text'].upper()
-                    toyota_match = re.search(r'([A-Z]{2})\s*(\d{5})', text)
-                    if toyota_match:
-                        return f"{toyota_match.group(1)} {toyota_match.group(2)}"
-                
-                # Take the best few results for post-processing
-                best_candidates = filtered_results[:min(3, len(filtered_results))]
-                
-                # Post-process each candidate and keep the best match
-                for candidate in best_candidates:
-                    processed_text = post_process_license_plate(candidate['text'])
+                # Take the best candidates and try to apply pattern matching
+                if filtered_results:
+                    # Get the highest confidence result
+                    best_result = filtered_results[0]
+                    best_text = best_result['text'].upper()
+                    
+                    # Apply post-processing to improve the result
+                    processed_text = post_process_license_plate(best_text)
                     if processed_text:
-                        # Return if we found a non-state-name match
-                        if processed_text.upper() not in state_names:
-                            # Specifically check for formats close to AM 74043
-                            am_like = re.search(r'([A-Z]{2})\s*(\d{5})', processed_text)
-                            if am_like:
-                                letters = am_like.group(1).upper()
-                                # If letters are close to "AM", return the known plate
-                                if ('A' in letters or '8' in letters) and ('M' in letters or 'R' in letters):
-                                    return "AM 74043"
-                                return f"{am_like.group(1)} {am_like.group(2)}"
-                            return processed_text
-                
-                # If no pattern matched, combine the best results
-                # This works especially well for traffic scenes where we might have detected individual characters
-                combined_text = ''.join(c for c in filtered_results[0]['text'] if c.isalnum())
-                if combined_text.upper() in state_names and len(filtered_results) > 1:
-                    combined_text = ''.join(c for c in filtered_results[1]['text'] if c.isalnum())
-                
-                # Check one more time for AM 74043 format before returning
-                am_like = re.search(r'([A-Z]{2})(\d{5})', combined_text)
-                if am_like:
-                    letters = am_like.group(1).upper()
-                    # If letters are close to "AM", return the known plate
-                    if ('A' in letters or '8' in letters) and ('M' in letters or 'R' in letters):
-                        return "AM 74043"
-                    return f"{am_like.group(1)} {am_like.group(2)}"
-                
-                # Last resort: if we detect known patterns in the combined text
-                if ("8AR" in combined_text or "BAR" in combined_text or "8A" in combined_text) and any(d in combined_text for d in "45"):
-                    return "AM 74043"
-                
-                return combined_text
+                        return processed_text
+                    
+                    # If no specific pattern was found, return the best result
+                    return best_text
             
             return ""
         else:
@@ -698,111 +626,122 @@ def post_process_license_plate(text):
     if not text:
         return ""
     
-    # Special handling for the white Toyota with AM 74043 plate
-    # Common confusions in OCR:
-    # 8 can be recognized as A
-    # A can be recognized as R
-    # M can be recognized as R
-    # 7 can be recognized as 1, T
-    # 4 can be recognized as U, H
-    # 0 can be recognized as O, D, Q
-    if "8AR" in text or "BAR" in text or "SAR" in text:
-        if "M5" in text or "MS" in text or "N5" in text:
-            return "AM 74043"
-    
-    # List of state names to filter out
-    state_names = ["TEXAS", "CALIFORNIA", "FLORIDA", "NEW YORK", "OHIO", "WASHINGTON"]
-    
     # Remove any non-alphanumeric and space characters
     text = ''.join(c for c in text if c.isalnum() or c.isspace())
     
-    # Special case for just "TEXAS" - return expected text for demo
-    if text.strip().upper() == "TEXAS":
-        return "AM 74043"
-    
-    # Replace commonly confused characters
+    # Common character substitutions for OCR errors
     replacements = {
-        '8': 'A',  # 8 is often confused with A
-        'B': 'A',  # B can be confused with A
-        'R': 'M',  # R can be confused with M
-        'I': '7',  # I can be confused with 7
-        'S': '5',  # S can be confused with 5
-        'O': '0',  # O can be confused with 0
-        'Q': '0',  # Q can be confused with 0
-        'D': '0',  # D can be confused with 0
-        'U': '0',  # U can be confused with 0
-        'Z': '7',  # Z can be confused with 7
-        'L': '1',  # L can be confused with 1
-        'T': '7',  # T can be confused with 7
+        '8': 'B',  # 8 is often confused with B
+        '0': 'O',  # 0 is often confused with O
+        '1': 'I',  # 1 is often confused with I
+        '5': 'S',  # 5 is often confused with S
+        '2': 'Z',  # 2 is often confused with Z
     }
     
-    # Apply replacements for small, unclear plates in real scenes
-    result = text
-    for char, replacement in replacements.items():
-        result = result.replace(char, replacement)
+    # Only apply replacements based on context - plates typically have letters first, then numbers
+    # So don't replace numbers in numeric positions and don't replace letters in letter positions
     
-    # Clean up spaces and condensed characters
-    result = ' '.join(result.split())
+    # Try to identify plate format first
+    # Common formats: 3 letters + 4 numbers, 2 letters + 5 numbers, etc.
     
-    # SPECIAL CASE FOR WHITE TOYOTA: Try to match AM 74043 format
-    am_plate_match = re.search(r'([A-Z]{2})\s*(\d{5})', result, re.IGNORECASE)
-    if am_plate_match:
-        letters = am_plate_match.group(1).upper()
-        # If letters are close to "AM", return the known plate
-        if ('A' in letters or '8' in letters) and ('M' in letters or 'R' in letters):
-            return "AM 74043"
-        return f"{am_plate_match.group(1)} {am_plate_match.group(2)}"
-    
-    # Additional effort to find AM 74043 pattern in fuzzy text
-    # Look for A or AM followed by digits
-    am_fuzzy = re.search(r'(A[A-Z]?|8[A-Z]?)[^A-Z0-9]*(\d{4,5})', result, re.IGNORECASE)
-    if am_fuzzy:
-        # This is likely a match for the Toyota plate
-        return "AM 74043"
-    
-    # Specific patterns for license plates based on state formats
-    patterns = [
-        # AM 74043 format (white Toyota)
-        (r'([A-Z]{2})\s*(\d{5})', r'\1 \2'),
+    # Format: 3 letters + 4 numbers (e.g., ABC1234)
+    pattern_3l4n = re.match(r'^([A-Z0-9]{3})[ -]?([A-Z0-9]{4})$', text, re.IGNORECASE)
+    if pattern_3l4n:
+        # Extract the letter part and number part
+        letter_part = pattern_3l4n.group(1)
+        number_part = pattern_3l4n.group(2)
         
-        # Texas format: 3 letters + 4 numbers
-        (r'([A-Z]{3})\s*(\d{4})', r'\1 \2'),
+        # Fix letter part - replace numbers with letters where appropriate
+        letter_part_fixed = ""
+        for c in letter_part:
+            if c.isdigit() and c in replacements:
+                letter_part_fixed += replacements[c]
+            else:
+                letter_part_fixed += c
         
-        # 3 letters + space/symbol + 4 digits (common format)
-        (r'([A-Z]{3})[\s\-\*\.]+(\d{4})', r'\1 \2'),
+        # Fix number part - replace letters with numbers where appropriate
+        # For example, replace 'O' with '0', 'I' with '1'
+        number_part_fixed = ""
+        for c in number_part:
+            if c.isalpha():
+                # Map letters back to numbers 
+                if c == 'O' or c == 'o': 
+                    number_part_fixed += '0'
+                elif c == 'I' or c == 'i' or c == 'l' or c == 'L':
+                    number_part_fixed += '1'
+                elif c == 'Z' or c == 'z':
+                    number_part_fixed += '2'
+                elif c == 'S' or c == 's':
+                    number_part_fixed += '5'
+                elif c == 'B' or c == 'b':
+                    number_part_fixed += '8'
+                else:
+                    number_part_fixed += c
+            else:
+                number_part_fixed += c
+                
+        return f"{letter_part_fixed} {number_part_fixed}"
+    
+    # Format: 2 letters + 5 numbers (e.g., AM 74043)
+    pattern_2l5n = re.match(r'^([A-Z0-9]{2})[ -]?([A-Z0-9]{5})$', text, re.IGNORECASE)
+    if pattern_2l5n:
+        letter_part = pattern_2l5n.group(1)
+        number_part = pattern_2l5n.group(2)
         
-        # 3 letters + 4 digits without space
-        (r'([A-Z]{3})(\d{4})', r'\1 \2'),
+        # Fix letter part
+        letter_part_fixed = ""
+        for c in letter_part:
+            if c.isdigit() and c in replacements:
+                letter_part_fixed += replacements[c]
+            else:
+                letter_part_fixed += c
         
-        # General format: 3 alphanumeric + 4 alphanumeric
-        (r'([A-Z0-9]{3})[\s\-\*\.]*([A-Z0-9]{4})', r'\1 \2'),
+        # Fix number part
+        number_part_fixed = ""
+        for c in number_part:
+            if c.isalpha():
+                if c == 'O' or c == 'o': 
+                    number_part_fixed += '0'
+                elif c == 'I' or c == 'i' or c == 'l' or c == 'L':
+                    number_part_fixed += '1'
+                elif c == 'Z' or c == 'z':
+                    number_part_fixed += '2'
+                elif c == 'S' or c == 's':
+                    number_part_fixed += '5'
+                elif c == 'B' or c == 'b':
+                    number_part_fixed += '8'
+                else:
+                    number_part_fixed += c
+            else:
+                number_part_fixed += c
+                
+        return f"{letter_part_fixed} {number_part_fixed}"
+    
+    # Format: 3 digits + 3 letters + 1 digit (e.g., 123ABC4)
+    pattern_3d3l1d = re.match(r'^([A-Z0-9]{3})[ -]?([A-Z0-9]{3})[ -]?([A-Z0-9]{1})$', text, re.IGNORECASE)
+    if pattern_3d3l1d:
+        # This is a less common pattern, but handle it
+        first_part = pattern_3d3l1d.group(1)
+        middle_part = pattern_3d3l1d.group(2)
+        last_part = pattern_3d3l1d.group(3)
         
-        # For cases where there's a state name recognized with the plate
-        (r'.*([A-Z]{3})[\s\-\*\.]*(\d{4}).*', r'\1 \2'),
-    ]
+        # Process with best guess based on position
+        first_part_fixed = ''.join([replacements.get(c, c) if c.isdigit() else c for c in first_part])
+        middle_part_fixed = middle_part  # Keep as is, could be either
+        last_part_fixed = last_part      # Keep as is, could be either
+                
+        return f"{first_part_fixed} {middle_part_fixed} {last_part_fixed}"
     
-    # Try each pattern
-    for pattern, replacement in patterns:
-        match = re.search(pattern, result, re.IGNORECASE)
-        if match:
-            return re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    # For all other formats, return the original text but with basic cleaning
+    # Remove multiple spaces
+    cleaned_text = ' '.join(text.split())
     
-    # If no pattern match, try to extract the most likely license plate text
-    # Look for 2 or 3 letter segments followed by 4-5 digit segments
-    letter_match = re.search(r'([A-Z]{2,3})', result, re.IGNORECASE)
-    digit_match = re.search(r'(\d{4,5})', result)
+    # Add a space if the pattern appears to be alphanumerics divided by position
+    # This handles cases like "ABC1234" turning into "ABC 1234"
+    alpha_num_pattern = re.match(r'^([A-Z]{2,3})(\d{3,5})$', cleaned_text, re.IGNORECASE)
+    if alpha_num_pattern:
+        return f"{alpha_num_pattern.group(1)} {alpha_num_pattern.group(2)}"
     
-    if letter_match and digit_match:
-        letters = letter_match.group(1).upper()
-        # If letters are close to "AM", return the known plate
-        if ('A' in letters or '8' in letters) and ('M' in letters or 'R' in letters):
-            return "AM 74043"
-        return f"{letter_match.group(1)} {digit_match.group(1)}"
-    
-    # Toyota Corolla-specific: Explicitly check for common Toyota patterns (AM 74043)
-    if ("AM" in result.upper() or "AN" in result.upper() or "8M" in result.upper() or "AR" in result.upper() 
-        or "8R" in result.upper() or "BR" in result.upper()) and any(d in result for d in "74"):
-        return "AM 74043"
-    
-    # Remove any remaining spaces and return
-    return result.replace(" ", "") 
+    # Special case for vanity plates with mixed alphanumerics
+    # For these, we'll just return the cleaned text
+    return cleaned_text 
