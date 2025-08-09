@@ -686,3 +686,4 @@ def create_evaluation_from_csv(csv_path: str, images_dir: str = "") -> Evaluatio
     evaluation = EvaluationMetrics()
     evaluation.evaluate_from_results_csv(csv_path, images_dir)
     return evaluation
+

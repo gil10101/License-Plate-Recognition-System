@@ -652,3 +652,4 @@ def load_ocr_results_from_csv(csv_path: str,
         )
     
     return metrics
+

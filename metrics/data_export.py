@@ -587,3 +587,4 @@ def export_metrics_for_bi(evaluation_metrics: EvaluationMetrics,
         return {'database': str(db_path)}
     else:
         raise ValueError(f"Unsupported output format: {output_format}")
+
