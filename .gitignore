@@ -50,4 +50,22 @@ static/images/*
 .venv/*
 
 
+# Model weights and training artifacts
+*.pt
+license_plate_detection/**
+
+# Generated results and reports
+*results.json
+*results.csv
+debug_images/
+debug_output/
+ocr_debug_output/
+output/
+verification_output/
+training_monitor/
+
+# Scripts not intended for commit
+test_model.bat
+
+
 
