@@ -5,9 +5,10 @@ import torch
 import cv2
 import numpy as np
 from pathlib import Path
+from typing import List
 
 class CustomLicensePlateDetector:
-    def __init__(self, weights_path=None, confidence_threshold=0.25, device=None):
+    def __init__(self, weights_path=None, confidence_threshold=0.25, device=None, inference_imgsz: int = 1280):
         """
         Initialize the custom license plate detector.
         
@@ -19,6 +20,7 @@ class CustomLicensePlateDetector:
         # Lowered the default confidence threshold from 0.5 to 0.25 to capture more potential plates
         self.confidence_threshold = confidence_threshold
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.inference_imgsz = inference_imgsz  # higher imgsz -> more detail (e.g., 960/1280)
         
         # Load model from weights
         try:
@@ -67,35 +69,68 @@ class CustomLicensePlateDetector:
         # Store original image dimensions
         original_height, original_width = image.shape[:2]
         
-        # Run multiple detection passes with different configurations for better results
-        license_plates = []
-        
-        # First pass: standard detection with configured confidence threshold
-        results = self.model(image, conf=self.confidence_threshold)
-        
-        # Extract license plate detections
-        if len(results) > 0:
+        # Multi-scale TTA + Weighted Boxes Fusion
+        from ensemble_boxes import weighted_boxes_fusion  # type: ignore
+
+        H, W = image.shape[:2]
+        # Use larger test-time scales to preserve small-character detail
+        scales = [1.0, 1.5, 2.0]
+        boxes_list: List[List[List[float]]] = []
+        scores_list: List[List[float]] = []
+        labels_list: List[List[int]] = []
+
+        for s in scales:
+            im = cv2.resize(image, None, fx=s, fy=s)
+            try:
+                results = self.model(im, conf=self.confidence_threshold, imgsz=self.inference_imgsz, verbose=False)
+            except Exception:
+                results = []
+            if len(results) == 0:
+                continue
+            cur_boxes: List[List[float]] = []
+            cur_scores: List[float] = []
+            cur_labels: List[int] = []
             for r in results:
-                boxes = r.boxes
+                boxes = getattr(r, 'boxes', [])
                 for box in boxes:
-                    # Get box coordinates
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = box.conf[0].cpu().numpy()
-                    cls = box.cls[0].cpu().numpy()
-                    
-                    # Increase confidence for detections with proper license plate aspect ratio
-                    aspect_ratio = (x2 - x1) / (y2 - y1) if (y2 - y1) > 0 else 0
-                    if 1.8 <= aspect_ratio <= 5.0:  # Common license plate aspect ratios
-                        conf = min(conf + 0.1, 1.0)  # Boost confidence but cap at 1.0
-                    
-                    # Add detection to list
-                    license_plates.append([int(x1), int(y1), int(x2), int(y2), float(conf), int(cls)])
-        
-        # Second pass: Try with a lower confidence threshold if no plates found
+                    conf = float(box.conf[0].cpu().numpy())
+                    cls = int(box.cls[0].cpu().numpy())
+                    # normalize to 0..1 for WBF using scaled image dims
+                    cur_boxes.append([
+                        max(0.0, x1 / im.shape[1]),
+                        max(0.0, y1 / im.shape[0]),
+                        min(1.0, x2 / im.shape[1]),
+                        min(1.0, y2 / im.shape[0])
+                    ])
+                    # Aspect ratio prior boost
+                    ar = (x2 - x1) / (y2 - y1) if (y2 - y1) > 0 else 0.0
+                    if 1.8 <= ar <= 5.0:
+                        conf = min(conf + 0.1, 1.0)
+                    cur_scores.append(conf)
+                    cur_labels.append(cls)
+            if cur_boxes:
+                boxes_list.append(cur_boxes)
+                scores_list.append(cur_scores)
+                labels_list.append(cur_labels)
+
+        license_plates = []
+        if boxes_list:
+            # Fuse
+            try:
+                fused_boxes, fused_scores, fused_labels = weighted_boxes_fusion(
+                    boxes_list, scores_list, labels_list, iou_thr=0.55, skip_box_thr=0.001
+                )
+                for (x1n, y1n, x2n, y2n), sc, cls in zip(fused_boxes, fused_scores, fused_labels):
+                    x1 = int(x1n * W); y1 = int(y1n * H); x2 = int(x2n * W); y2 = int(y2n * H)
+                    license_plates.append([x1, y1, x2, y2, float(sc), int(cls)])
+            except Exception:
+                pass
+
+        # Fallback to single-pass flow if nothing fused
         if not license_plates:
-            lower_conf = max(0.15, self.confidence_threshold - 0.1)
-            results = self.model(image, conf=lower_conf)
-            
+            # original logic: lower threshold pass, likely-plate fallback, edge-based backup
+            results = self.model(image, conf=self.confidence_threshold, imgsz=self.inference_imgsz, verbose=False)
             if len(results) > 0:
                 for r in results:
                     boxes = r.boxes
@@ -103,29 +138,20 @@ class CustomLicensePlateDetector:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         conf = box.conf[0].cpu().numpy()
                         cls = box.cls[0].cpu().numpy()
-                        
-                        # Increase confidence for detections with proper license plate aspect ratio
-                        aspect_ratio = (x2 - x1) / (y2 - y1) if (y2 - y1) > 0 else 0
-                        if 1.8 <= aspect_ratio <= 5.0:
+                        ar = (x2 - x1) / (y2 - y1) if (y2 - y1) > 0 else 0
+                        if 1.8 <= ar <= 5.0:
                             conf = min(conf + 0.1, 1.0)
-                        
-                        # Add detection to list
                         license_plates.append([int(x1), int(y1), int(x2), int(y2), float(conf), int(cls)])
-        
-        # If still no license plates detected and this appears to be a direct license plate image,
-        # use the entire image as a fallback
+
         if not license_plates and self._is_likely_plate_image(image):
             h, w = image.shape[:2]
-            license_plates.append([0, 0, w, h, 0.85, 0])  # Slightly lower confidence (0.85) for direct plate image
-        
-        # Additional check for images that might not be recognized 
-        # but have the characteristics of a license plate
+            license_plates.append([0, 0, w, h, 0.85, 0])
+
         if not license_plates:
-            # Try edge-based detection as a last resort
             possible_plates = self._detect_plates_with_edges(image)
             if possible_plates:
                 license_plates.extend(possible_plates)
-        
+
         return license_plates
     
     def _is_likely_plate_image(self, image):

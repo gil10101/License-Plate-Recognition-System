@@ -9,3 +9,6 @@ Pillow==9.5.0
 matplotlib==3.7.2
 tqdm==4.65.0
 ultralytics==8.0.196 
+easyocr>=1.7.1
+paddleocr>=2.7.0
+ensemble-boxes>=1.0.9
